@@ -10,20 +10,32 @@ export async function maybeExtractVoiceprintCandidates(input: {
   transcriptId: string;
   audioPath: string | null | undefined;
 }): Promise<void> {
-  if (!input.enabled || !input.audioPath) {
-    return;
+  if (input.enabled && input.audioPath) {
+    try {
+      const result = await transcriptionCommands.extractVoiceprintCandidates(
+        input.sessionId,
+        input.transcriptId,
+        input.audioPath,
+      );
+      if (result.status === "error") {
+        console.error("[voiceprint] candidate extraction failed", result.error);
+      }
+    } catch (error) {
+      console.error("[voiceprint] candidate extraction failed", error);
+    }
   }
 
+  // After the voiceprints, so it names only the speakers they left open. It
+  // reads only the words, so it needs neither the recording nor remembered voices.
   try {
-    const result = await transcriptionCommands.extractVoiceprintCandidates(
+    const result = await transcriptionCommands.assignSpeakersFromMentions(
       input.sessionId,
       input.transcriptId,
-      input.audioPath,
     );
     if (result.status === "error") {
-      console.error("[voiceprint] candidate extraction failed", result.error);
+      console.error("[voiceprint] mention naming failed", result.error);
     }
   } catch (error) {
-    console.error("[voiceprint] candidate extraction failed", error);
+    console.error("[voiceprint] mention naming failed", error);
   }
 }

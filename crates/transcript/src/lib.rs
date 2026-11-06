@@ -2,6 +2,10 @@ mod batch_refine;
 mod channel_state;
 mod label;
 mod live_materialize;
+mod name_mentions;
+pub use name_mentions::{
+    MentionCandidate, MentionNaming, MentionTurn, mention_turns, name_speakers_from_mentions,
+};
 mod postprocessor;
 mod processor;
 mod render;

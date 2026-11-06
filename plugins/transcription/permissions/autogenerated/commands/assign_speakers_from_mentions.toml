@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-assign-speakers-from-mentions"
+description = "Enables the assign_speakers_from_mentions command without any pre-configured scope."
+commands.allow = ["assign_speakers_from_mentions"]
+
+[[permission]]
+identifier = "deny-assign-speakers-from-mentions"
+description = "Denies the assign_speakers_from_mentions command without any pre-configured scope."
+commands.deny = ["assign_speakers_from_mentions"]

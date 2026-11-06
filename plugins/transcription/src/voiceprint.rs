@@ -34,6 +34,8 @@ struct StoredWord {
     channel: i64,
     #[serde(default)]
     speaker_index: Option<i64>,
+    #[serde(default)]
+    text: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -44,6 +46,23 @@ struct StoredHint {
     hint_type: String,
     #[serde(default)]
     value: serde_json::Value,
+}
+
+/// Its own command because it needs only the words: it runs without a recording
+/// and with "remember speakers" off. Called after voiceprint extraction, so it
+/// names only the speakers the voiceprints left open.
+#[tauri::command]
+#[specta::specta]
+pub async fn assign_speakers_from_mentions<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    session_id: String,
+    transcript_id: String,
+) -> Result<(), String> {
+    let pool = app
+        .try_state::<tauri_plugin_db::ManagedState>()
+        .map(|state| state.pool().clone())
+        .ok_or_else(|| "database is not ready yet".to_string())?;
+    maybe_assign_speakers_from_mentions(&pool, &session_id, &transcript_id).await
 }
 
 #[tauri::command]
@@ -1131,8 +1150,14 @@ async fn embeddings_from_stored_candidates<R: tauri::Runtime>(
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum NamingBasis {
-    Voiceprint { score: f32 },
+    Voiceprint {
+        score: f32,
+    },
     Elimination,
+    /// Named from what was said; `score` is `anlg_transcript`'s cue total.
+    Mention {
+        score: f32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1193,6 +1218,122 @@ fn eliminate_last_remote_speaker(
         human_id,
         basis: NamingBasis::Elimination,
     })
+}
+
+/// Names the speakers no hint names yet from what is said, among the session's
+/// participants, and writes them as automatic assignments.
+async fn maybe_assign_speakers_from_mentions(
+    pool: &sqlx::SqlitePool,
+    session_id: &str,
+    transcript_id: &str,
+) -> Result<(), String> {
+    let participants: Vec<(String, String)> =
+        anlg_db_app::list_session_participants(pool, session_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|participant| (participant.human_id, participant.display_name))
+            .collect();
+    if participants.is_empty() {
+        return Ok(());
+    }
+    for attempt in 0..2 {
+        let Some((words_json, hints_json)) =
+            load_transcript_words_and_hints(pool, session_id, transcript_id).await?
+        else {
+            return Ok(());
+        };
+        let index = speaker_index_from_transcript(&words_json, &hints_json)?;
+        let namings = mention_namings(&words_json, &hints_json, &index, &participants)?;
+        if namings.is_empty() {
+            return Ok(());
+        }
+        let Some(next_json) = assignment_hints_json(&hints_json, &index, &namings)? else {
+            return Ok(());
+        };
+        if write_speaker_assignment_hints(
+            pool,
+            session_id,
+            transcript_id,
+            &words_json,
+            &hints_json,
+            &next_json,
+        )
+        .await?
+        {
+            tracing::info!(
+                session_id,
+                transcript_id,
+                assigned = namings.len(),
+                "mention_speakers_assigned"
+            );
+            return Ok(());
+        }
+        if attempt == 0 {
+            tracing::warn!(transcript_id, "mention_assignment_hints_conflict");
+        }
+    }
+    Ok(())
+}
+
+/// The speakers still open, named from the turns of the transcript. The mic
+/// channel normally holds only the user, whom the speaker context names; it is
+/// open here only when diarization found several people at the mic.
+fn mention_namings(
+    words_json: &str,
+    hints_json: &str,
+    index: &SpeakerIndex,
+    participants: &[(String, String)],
+) -> Result<Vec<SpeakerNaming>, String> {
+    let words: Vec<StoredWord> =
+        serde_json::from_str(words_json).map_err(|error| error.to_string())?;
+    let hints: Vec<StoredHint> = serde_json::from_str(hints_json).unwrap_or_default();
+    let hinted_speaker_by_word = provider_speaker_index_by_word(&hints);
+    let mut ordered: Vec<&StoredWord> = words.iter().collect();
+    ordered.sort_by(|left, right| left.start_ms.total_cmp(&right.start_ms));
+    let turns = anlg_transcript::mention_turns(ordered.iter().map(|word| {
+        let hinted = word
+            .id
+            .as_ref()
+            .and_then(|id| hinted_speaker_by_word.get(id).copied());
+        (speaker_key_for_word(word, hinted), word.text.as_str())
+    }));
+
+    let mic_speakers = index
+        .first_word_id
+        .keys()
+        .filter(|speaker| speaker.channel == DIRECT_MIC_CHANNEL)
+        .count();
+    let unnamed: HashSet<VoiceprintSpeakerKey> = index
+        .first_word_id
+        .keys()
+        .filter(|speaker| !index.assigned_speakers.contains(speaker))
+        .filter(|speaker| speaker.channel != DIRECT_MIC_CHANNEL || mic_speakers > 1)
+        .copied()
+        .collect();
+    let candidates: Vec<anlg_transcript::MentionCandidate> = participants
+        .iter()
+        .map(|(human_id, name)| anlg_transcript::MentionCandidate {
+            human_id: human_id.clone(),
+            name: name.clone(),
+        })
+        .collect();
+
+    Ok(anlg_transcript::name_speakers_from_mentions(
+        &turns,
+        &candidates,
+        &unnamed,
+        &index.assigned_human_ids,
+    )
+    .into_iter()
+    .map(|naming| SpeakerNaming {
+        speaker: naming.speaker,
+        human_id: naming.human_id,
+        basis: NamingBasis::Mention {
+            score: naming.score,
+        },
+    })
+    .collect())
 }
 
 fn assignment_hints_json(
@@ -1377,6 +1518,13 @@ fn automatic_speaker_hint(word_id: &str, human_id: &str, basis: NamingBasis) -> 
         NamingBasis::Elimination => serde_json::json!({
             "human_id": human_id,
             "source": "elimination",
+        }),
+        // An introduction (3) reads as 0.75 and two addresses (2) as 0.67, under
+        // a voiceprint match: people mishear names, voices do not change.
+        NamingBasis::Mention { score } => serde_json::json!({
+            "human_id": human_id,
+            "confidence": score / (score + 1.0),
+            "source": "transcript_mention",
         }),
     };
     serde_json::json!({
@@ -1726,5 +1874,78 @@ mod tests {
                 .map(|naming| naming.human_id),
             Some("cy".to_string())
         );
+    }
+
+    const MENTION_PEOPLE: &[(&str, &str)] = &[("ada", "Ada Lovelace"), ("marco", "Marco Polo")];
+
+    fn mention_people() -> Vec<(String, String)> {
+        MENTION_PEOPLE
+            .iter()
+            .map(|(id, name)| (id.to_string(), name.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn mention_namings_name_an_introduced_remote_speaker() {
+        let words = r#"[
+            {"id": "w1", "text": "Hi,", "start_ms": 0, "end_ms": 300, "channel": 1, "speaker_index": 0},
+            {"id": "w2", "text": "I'm", "start_ms": 300, "end_ms": 600, "channel": 1, "speaker_index": 0},
+            {"id": "w3", "text": "Ada.", "start_ms": 600, "end_ms": 900, "channel": 1, "speaker_index": 0},
+            {"id": "w4", "text": "Welcome.", "start_ms": 1000, "end_ms": 1400, "channel": 1, "speaker_index": 1}
+        ]"#;
+        let index = speaker_index_from_transcript(words, "[]").unwrap();
+        let namings = mention_namings(words, "[]", &index, &mention_people()).unwrap();
+        assert_eq!(namings.len(), 1);
+        assert_eq!(namings[0].speaker, remote_speaker(0));
+        assert_eq!(namings[0].human_id, "ada");
+
+        let next = assignment_hints_json("[]", &index, &namings)
+            .unwrap()
+            .unwrap();
+        let hints: Vec<serde_json::Value> = serde_json::from_str(&next).unwrap();
+        assert_eq!(hints[0]["word_id"], "w1");
+        let value: serde_json::Value =
+            serde_json::from_str(hints[0]["value"].as_str().unwrap()).unwrap();
+        assert_eq!(value["source"], "transcript_mention");
+        assert!((value["confidence"].as_f64().unwrap() - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mention_namings_leave_assigned_speakers_and_people_alone() {
+        let words = r#"[
+            {"id": "w1", "text": "I'm Ada.", "start_ms": 0, "end_ms": 900, "channel": 1, "speaker_index": 0},
+            {"id": "w2", "text": "I'm Marco.", "start_ms": 1000, "end_ms": 1400, "channel": 1, "speaker_index": 1}
+        ]"#;
+        let hints = r#"[
+            {"word_id": "w1", "type": "user_speaker_assignment", "value": {"human_id": "marco"}}
+        ]"#;
+        let index = speaker_index_from_transcript(words, hints).unwrap();
+        assert!(
+            mention_namings(words, hints, &index, &mention_people())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn mention_namings_skip_a_mic_that_only_the_user_speaks_into() {
+        let words = r#"[
+            {"id": "w1", "text": "I'm Ada.", "start_ms": 0, "end_ms": 900, "channel": 0}
+        ]"#;
+        let index = speaker_index_from_transcript(words, "[]").unwrap();
+        assert!(
+            mention_namings(words, "[]", &index, &mention_people())
+                .unwrap()
+                .is_empty()
+        );
+
+        let shared_mic = r#"[
+            {"id": "w1", "text": "I'm Ada.", "start_ms": 0, "end_ms": 900, "channel": 0, "speaker_index": 0},
+            {"id": "w2", "text": "Hello.", "start_ms": 1000, "end_ms": 1400, "channel": 0, "speaker_index": 1}
+        ]"#;
+        let index = speaker_index_from_transcript(shared_mic, "[]").unwrap();
+        let namings = mention_namings(shared_mic, "[]", &index, &mention_people()).unwrap();
+        assert_eq!(namings.len(), 1);
+        assert_eq!(namings[0].human_id, "ada");
     }
 }

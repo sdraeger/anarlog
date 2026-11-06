@@ -763,6 +763,28 @@ export const commands = {
     }
   },
   /**
+   * Its own command because it needs only the words: it runs without a recording
+   * and with "remember speakers" off. Called after voiceprint extraction, so it
+   * names only the speakers the voiceprints left open.
+   */
+  async assignSpeakersFromMentions(
+    sessionId: string,
+    transcriptId: string,
+  ): Promise<Result<null, string>> {
+    try {
+      return {
+        status: "ok",
+        data: await TAURI_INVOKE(
+          "plugin:transcription|assign_speakers_from_mentions",
+          { sessionId, transcriptId },
+        ),
+      };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  /**
    * Deletes local audio right after processing when the retention policy is `none`.
    */
   async deleteProcessedSessionAudio(

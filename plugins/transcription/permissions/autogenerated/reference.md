@@ -45,6 +45,7 @@ Default permissions for the plugin
 - `allow-acknowledge-completed-transcription`
 - `allow-extract-voiceprint-candidates`
 - `allow-promote-voiceprint-candidates`
+- `allow-assign-speakers-from-mentions`
 - `allow-delete-processed-session-audio`
 - `allow-parse-subtitle`
 - `allow-export-to-vtt`
@@ -166,6 +167,32 @@ Enables the acknowledge_stopped_capture command without any pre-configured scope
 <td>
 
 Denies the acknowledge_stopped_capture command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`transcription:allow-assign-speakers-from-mentions`
+
+</td>
+<td>
+
+Enables the assign_speakers_from_mentions command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`transcription:deny-assign-speakers-from-mentions`
+
+</td>
+<td>
+
+Denies the assign_speakers_from_mentions command without any pre-configured scope.
 
 </td>
 </tr>

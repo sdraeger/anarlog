@@ -40,6 +40,7 @@ const COMMANDS: &[&str] = &[
     "acknowledge_completed_transcription",
     "extract_voiceprint_candidates",
     "promote_voiceprint_candidates",
+    "assign_speakers_from_mentions",
     "delete_processed_session_audio",
     "parse_subtitle",
     "export_to_vtt",

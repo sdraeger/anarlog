@@ -1227,16 +1227,20 @@ export function useCaptureLifecycle(sessionId: string) {
         }
 
         try {
-          if (details.audioPath && transcriptIsComplete) {
+          if (transcriptIsComplete) {
+            // Names from the conversation need no recording, so this runs even
+            // when no audio was kept; voiceprints are skipped inside without one.
             await maybeExtractVoiceprintCandidates({
               enabled: rememberSpeakers,
               sessionId,
               transcriptId,
               audioPath: details.audioPath,
             });
-            await persistTranscriptWrite(() =>
-              markSessionAudioTranscriptionComplete(sessionId),
-            );
+            if (details.audioPath) {
+              await persistTranscriptWrite(() =>
+                markSessionAudioTranscriptionComplete(sessionId),
+              );
+            }
           }
           await releaseMarker();
           recoveryPending = false;
